@@ -1,0 +1,11 @@
+{
+  "pull_request": {
+    "number": 1,
+    "head": {
+      "sha": "HEAD_COMMIT_SHA"
+    },
+    "base": {
+      "sha": "BASE_COMMIT_SHA"
+    }
+  }
+}

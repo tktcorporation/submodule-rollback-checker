@@ -1,0 +1,17 @@
+name: Check Submodule Rollback
+
+on:
+  pull_request:
+
+
+jobs:
+  check-submodule:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Check for submodule rollback
+        uses: ./
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
