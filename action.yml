@@ -6,110 +6,142 @@ branding:
   color: 'yellow'
 
 inputs:
-  token:
-    description: 'A token (e.g., GitHub PAT or GITHUB_TOKEN) with permission to read submodules.'
+  github-token:
+    description: 'A token (e.g., GitHub PAT or github-token) with permission to read submodules.'
     required: true
 
-outputs:
-  has_warning:
-    description: 'true if a submodule rollback is detected, otherwise false.'
-
 runs:
-  using: 'composite'
+  using: "composite"
   steps:
-    - name: Extract PR info
+    - name: Extract PR info from environment
+      id: extract_info
       run: |
-        base_sha=$(jq -r .pull_request.base.sha $GITHUB_EVENT_PATH)
-        head_sha=$(jq -r .pull_request.head.sha $GITHUB_EVENT_PATH)
-        issue_number=$(jq -r .pull_request.number $GITHUB_EVENT_PATH)
+        echo "[DEBUG] GITHUB_REF=$GITHUB_REF"
+        echo "[DEBUG] GITHUB_REPOSITORY=$GITHUB_REPOSITORY"
+        echo "[DEBUG] GITHUB_BASE_REF=$GITHUB_BASE_REF"
+        echo "[DEBUG] GITHUB_HEAD_REF=$GITHUB_HEAD_REF"
 
-        echo "base_sha=$base_sha" >> $GITHUB_OUTPUT
-        echo "head_sha=$head_sha" >> $GITHUB_OUTPUT
-        echo "issue_number=$issue_number" >> $GITHUB_OUTPUT
+        # PR番号抽出: refs/pull/123/merge の 123 を抽出
+        pr_number=$(echo "$GITHUB_REF" | grep -oE 'pull/[0-9]+' | cut -d'/' -f2)
+        owner="${GITHUB_REPOSITORY%/*}"
+        repo="${GITHUB_REPOSITORY#*/}"
 
-    - name: Checkout HEAD commit (PR head)
-      uses: actions/checkout@v4
-      with:
-        token: ${{ inputs.token }}
-        ref: ${{ steps.extract_pr_info.outputs.head_sha }}
-        submodules: 'recursive'
-        fetch-depth: 0
-
-    - name: Get submodule paths
-      id: get_submodule_paths
-      run: |
-        git config --file .gitmodules --get-regexp path | awk '{ print $2 }' | paste -sd ',' - > submodule_paths.txt
-        if [ ! -s submodule_paths.txt ]; then
-          echo "::error::No submodules found. Please check the .gitmodules file."
+        if [ -z "$pr_number" ]; then
+          echo "::error::Could not determine PR number from GITHUB_REF"
           exit 1
         fi
-        echo "submodule_paths=$(cat submodule_paths.txt)" >> "$GITHUB_OUTPUT"
 
-    - name: Record HEAD submodule commits
-      id: record_head_submodules
+        if [ -z "$owner" ] || [ -z "$repo" ]; then
+          echo "::error::Could not determine owner/repo from GITHUB_REPOSITORY"
+          exit 1
+        fi
+
+        echo "pr_number=$pr_number" >> "$GITHUB_OUTPUT"
+        echo "owner=$owner" >> "$GITHUB_OUTPUT"
+        echo "repo=$repo" >> "$GITHUB_OUTPUT"
+
+    - name: Checkout base branch
+      uses: actions/checkout@v4
+      with:
+        token: ${{ inputs.github-token }}
+        ref: $GITHUB_BASE_REF
+        submodules: 'recursive'
+
+    - name: Get base commit hash
+      id: get_base_commit
       run: |
-        submodule_paths=${{ steps.get_submodule_paths.outputs.submodule_paths }}
-        IFS=',' read -r -a paths <<< "$submodule_paths"
-        > head_submodules.json
-        echo "[" >> head_submodules.json
-        for p in "${paths[@]}"; do
-          head_hash=$(git -C "$p" rev-parse HEAD)
-          submodule_url=$(git -C "$p" remote get-url origin)
-          owner=$(echo $submodule_url | cut -d'/' -f4)
-          repo=$(echo $submodule_url | cut -d'/' -f5 | sed 's/.git$//')
-          echo "{\"path\":\"$p\", \"head_hash\":\"$head_hash\", \"owner\":\"$owner\", \"repo\":\"$repo\"}," >> head_submodules.json
+        base_commit_hash=$(git rev-parse HEAD)
+        echo "base_commit_hash=$base_commit_hash" >> "$GITHUB_OUTPUT"
+
+    - name: Store base submodules hash
+      id: store_base_submodules_hash
+      run: |
+        # 全サブモジュールパス取得
+        submodule_paths=$(git config --file .gitmodules --get-regexp path | awk '{print $2}')
+        echo "[DEBUG] Submodule paths:"
+        echo "$submodule_paths"
+
+        touch base_submodules_hash.json
+        echo -n "{" > base_submodules_hash.json
+        first=true
+        for p in $submodule_paths; do
+          hash=$(git -C "$p" rev-parse HEAD)
+          if [ "$first" = true ]; then
+            first=false
+          else
+            echo -n "," >> base_submodules_hash.json
+          fi
+          echo -n "\"$p\":\"$hash\"" >> base_submodules_hash.json
         done
-        sed -i '$ s/,$//' head_submodules.json
-        echo "]" >> head_submodules.json
-        echo "head_data=$(cat head_submodules.json | base64 -w0)" >> "$GITHUB_OUTPUT"
+        echo "}" >> base_submodules_hash.json
 
-    - name: Checkout base commit
+        echo "base_submodules_hash=$(cat base_submodules_hash.json)" >> "$GITHUB_OUTPUT"
+
+    - name: Checkout PR head branch
+      uses: actions/checkout@v4
+      with:
+        token: ${{ inputs.github-token }}
+        ref: $GITHUB_HEAD_REF
+        submodules: 'recursive'
+
+    - name: Check for rollback in each submodule
+      id: check_rollback
       run: |
-        git checkout ${{ steps.extract_pr_info.outputs.base_sha }}
-        git submodule update --init --recursive
+        base_commit_hash="${{ steps.get_base_commit.outputs.base_commit_hash }}"
+        base_submodules_hash='${{ steps.store_base_submodules_hash.outputs.base_submodules_hash }}'
 
-    - name: Compare submodules
-      id: compare_submodules
-      run: |
-        head_data_decoded=$(echo "${{ steps.record_head_submodules.outputs.head_data }}" | base64 -d)
-        echo "$head_data_decoded" > head_submodules.json
-        has_warning=false
-        > warning.txt
-        jq -c '.[]' head_submodules.json | while read sub; do
-          path=$(echo "$sub" | jq -r '.path')
-          head_hash=$(echo "$sub" | jq -r '.head_hash')
-          base_hash=$(git -C "$path" rev-parse HEAD)
+        echo "$base_submodules_hash" | jq '.' > base_submodules_hash.json
 
-          if [ -n "$base_hash" ] && [ -n "$head_hash" ]; then
-            git merge-base --is-ancestor "$base_hash" "$head_hash"
-            if [ $? -ne 0 ]; then
-              has_warning=true
-              echo "Submodule \`$path\` has been rolled back!
-              Base submodule commit: \`$base_hash\`
-              Incoming submodule commit: \`$head_hash\`" >> warning.txt
-            fi
+        submodule_paths=$(git config --file .gitmodules --get-regexp path | awk '{print $2}')
+        echo "[DEBUG] Checking submodules on PR head:"
+        echo "$submodule_paths"
+
+        touch warnings.txt
+        rollback_found=false
+
+        for p in $submodule_paths; do
+          incoming_hash=$(git -C "$p" rev-parse HEAD)
+          base_hash=$(echo "$base_submodules_hash" | jq -r ".[\"$p\"]")
+
+          if [ -z "$base_hash" ]; then
+            echo "Warning: could not find base hash for submodule $p"
+            continue
+          fi
+
+          git merge-base --is-ancestor "$base_hash" "$incoming_hash"
+          if [ $? -ne 0 ]; then
+            echo "Submodule '$p' has been rolled back from $base_hash to $incoming_hash!" >> warnings.txt
+            rollback_found=true
           fi
         done
 
-        if [ "$has_warning" = true ]; then
+        if [ "$rollback_found" = true ]; then
           echo "has_warning=true" >> "$GITHUB_OUTPUT"
-        else
-          echo "has_warning=false" >> "$GITHUB_OUTPUT"
         fi
 
     - name: Post warning comment if needed
-      if: ${{ steps.compare_submodules.outputs.has_warning == 'true' }}
+      if: ${{ steps.check_rollback.outputs.has_warning == 'true' }}
       uses: actions/github-script@v6
       with:
-        github-token: ${{ inputs.token }}
+        github-token: ${{ inputs.github-token }}
         script: |
           const fs = require('fs');
-          const warning = fs.readFileSync('warning.txt', 'utf8');
+          const warning = fs.readFileSync('warnings.txt', 'utf8');
+          const pr_number = parseInt("${{ steps.extract_info.outputs.pr_number }}", 10);
+          const owner = "${{ steps.extract_info.outputs.owner }}";
+          const repo = "${{ steps.extract_info.outputs.repo }}";
+
           if (warning) {
-            github.rest.issues.createComment({
-              issue_number: parseInt(${ { steps.extract_pr_info.outputs.issue_number } }),
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: `> [!CAUTION]\n> ${warning}`,
+            await github.rest.issues.createComment({
+              issue_number: pr_number,
+              owner,
+              repo,
+              body: `> [!CAUTION]\n> The following submodules have been rolled back:\n\n${warning}`,
             });
           }
+
+    - name: Fail job if rollback detected
+      if: ${{ steps.check_rollback.outputs.has_warning == 'true' }}
+      run: |
+        echo "Job failed due to submodule rollback"
+        exit 1

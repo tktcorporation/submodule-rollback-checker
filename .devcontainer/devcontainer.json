@@ -1,14 +1,11 @@
 {
 	"image": "mcr.microsoft.com/devcontainers/base:bookworm",
 	"features": {
-		"ghcr.io/devcontainers/features/docker-in-docker:2": {
-			"version": "latest",
-			"enableNonRootDocker": "true",
-			"moby": "true"
-		},
+		"ghcr.io/devcontainers/features/docker-in-docker:2": {},
 		"ghcr.io/devcontainers/features/github-cli:1": {},
 		"ghcr.io/devcontainers/features/node:1": {},
-		"ghcr.io/devcontainers-extra/features/act:1": {}
+		"ghcr.io/devcontainers-extra/features/act:1": {},
+		"ghcr.io/guiyomh/features/just:0": {}
 	},
 	"runArgs": [
 		"--env-file",
@@ -20,7 +17,8 @@
 				"ms-azuretools.vscode-docker",
 				"GitHub.copilot",
 				"mhutchie.git-graph",
-				"WakaTime.vscode-wakatime"
+				"WakaTime.vscode-wakatime",
+				"github.vscode-github-actions"
 			],
 			"files.watcherExclude": {
 				"**/.git/*/**": true,
